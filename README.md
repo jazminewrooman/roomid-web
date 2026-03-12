@@ -1,398 +1,237 @@
 # RoomID
 
-Privacy-first rental identity and compliance layer for the Room Protocol
-Suite.
+**Privacy-preserving rental identity layer for the Room Protocol ecosystem.**
+
+RoomID converts rental history documents into a signed, portable credential — a structured proof of tenant reliability that can be consumed by RoomFi for instant tenant screening without exposing raw financial data.
 
-RoomID transforms rental history and income evidence into structured,
-portable, and privacy‑preserving rental credentials.
+> ⚠️ ZK proofs are **simulated** in this demo. The architecture is designed to swap them for real **Noir (Aztec)** circuits in production.
+
+---
+
+## What it does
+
+A tenant uploads their rental contract and payment history. RoomID analyzes the documents, computes a reliability score, and issues a signed credential. That credential can then be submitted directly to RoomFi, where landlords verify it on-chain without ever seeing the tenant's underlying documents.
+
+```
+Tenant uploads docs → Scoring engine → Signed credential → Submitted to RoomFi
+```
 
-⚠️ Important: For the purposes of this demo, Zero-Knowledge proofs and
-circuits are **simulated**. Future production implementation will use
-**Noir by Aztec** for zk circuit development.
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14 (App Router), React 18, TypeScript |
+| Styling | Custom CSS (dark privacy theme) |
+| Backend | Next.js Route Handlers (no separate server) |
+| Scoring | `lib/scoring.ts` — pure TypeScript, no deps |
+| Credential | `lib/roomid-demo.ts` — HMAC-SHA256 signed JSON |
+| Crypto | Node.js `crypto` module (SHA-256, HMAC) |
+| Fonts | IBM Plex Sans + Space Grotesk (Google Fonts) |
+
+---
+
+## Project Structure
+
+```
+app/
+  page.tsx                  # Main app (landing → upload → processing → result)
+  layout.tsx                # Root layout with Navbar + Footer
+  globals.css               # Design system + component styles
+  api/
+    upload-documents/       # POST — accepts file metadata, creates job
+    job-status/[id]/        # GET  — polls processing progress
+    rental-score/[userId]/  # GET  — returns completed credential
+    verify-credential/      # POST — validates credential integrity
+
+lib/
+  scoring.ts                # Rental analysis + scoring model
+  roomid-demo.ts            # Job store, credential generation, verification
+
+components/ui/
+  Navbar.tsx / Footer.tsx
+  Card.tsx / Badge.tsx
+  UploadPanel.tsx           # File input with validation
+  StepStatus.tsx            # Processing step indicator
+  CredentialCard.tsx        # Credential display
+```
+
+---
+
+## User Flow
+
+### 1. Upload
+The tenant uploads up to three documents:
+- **Rental contract** *(required)* — PDF, JPG, PNG
+- **Payment proofs** *(required)* — bank transfers, receipts
+- **Landlord reference** *(optional)*
+
+### 2. Processing
+`POST /api/upload-documents` creates a job. The frontend polls `GET /api/job-status/:id` and progresses through four stages:
+
+| Stage | Label | Progress |
+|---|---|---|
+| 0 | Analyzing documents | 10% |
+| 1 | Extracting payment history | 35% |
+| 2 | Computing reliability score | 62% |
+| 3 | Preparing zk-proof (demo) | 86% |
+| — | Completed | 100% |
+
+### 3. Credential Issued
+Once complete, the frontend calls `GET /api/rental-score/:userId` and receives a signed `RentalCredential` object.
+
+---
+
+## Scoring Model (`lib/scoring.ts`)
+
+Payment records are analyzed against a due date with two thresholds:
+
+| Condition | Classification |
+|---|---|
+| Paid within 5 days of due date | On-time |
+| Paid 6–30 days after due date | Late |
+| Unpaid or > 30 days late | Default |
+
+**Score formula:**
+```
+score = 100
+score -= latePayments × 5
+score -= defaults × 20
+score += 5  (if consecutivePaidMonths >= 12)
+score = clamp(score, 0, 100)
+```
 
-RoomID is part of a suite that includes: - RoomFi (rental marketplace &
-contracts) - RoomLen (liquidity & lending)
+**Tiers:**
+```
+90–100 → Tier A (Excellent)
+75–89  → Tier B (Good)
+60–74  → Tier C (Medium)
+< 60   → Tier D (High Risk)
+```
+
+---
 
-For the hackathon demo **only RoomID will be modified or expanded**.
-RoomFi and RoomLen will remain visually unchanged.
+## Credential Schema
 
-------------------------------------------------------------------------
+```ts
+type RentalCredential = {
+  user_id:            string;   // UUID
+  rental_score:       number;   // 0–100
+  tier:               "A" | "B" | "C" | "D";
+  months_verified:    number;
+  on_time_payments:   number;
+  late_payments:      number;
+  defaults:           number;
+  max_delay_days:     number;
+  hash_of_documents:  string;   // SHA-256 of filenames
+  timestamp:          string;   // ISO 8601
+  proof_mode:         "simulated";
+  zk_ready:           boolean;
+  badges:             string[]; // human-readable proof labels
+  signature:          string;   // HMAC-SHA256
+}
+```
 
-# Design Direction (RoomID Only)
+The credential is signed server-side with HMAC-SHA256. `POST /api/verify-credential` checks all six integrity constraints:
 
-RoomID will adopt a **crypto‑privacy aesthetic** while remaining
-compatible with the existing UI of RoomFi and RoomLen.
+- Required fields present
+- Score in 0–100 range
+- Tier consistent with score
+- Timestamp parseable
+- Document hash is valid SHA-256 hex
+- Signature matches recomputed HMAC
 
-Design philosophy:
+---
 
-Fintech clarity + subtle crypto/privacy aesthetic.
+## API Endpoints
 
-The goal is to communicate: - security - privacy - cryptographic
-verification - trust
+### `POST /api/upload-documents`
+Accepts `multipart/form-data` with `contract`, `payments`, and optionally `reference`. Creates a processing job.
 
-without becoming visually chaotic or overly "cyberpunk".
+```json
+// Response
+{ "jobId": "uuid", "userId": "uuid" }
+```
 
-RoomID should feel slightly more **technical and privacy‑focused** than
-the other apps.
+### `GET /api/job-status/[id]`
+Returns current processing stage for polling.
 
-------------------------------------------------------------------------
+```json
+{ "jobId": "...", "userId": "...", "status": "processing", "stepIndex": 2, "progress": 62 }
+```
 
-# Visual Style
+### `GET /api/rental-score/[userId]`
+Returns the completed `RentalCredential` once `status === "completed"`.
 
-## Base Theme
+### `POST /api/verify-credential`
+Validates a credential object. Used by tenants and landlords.
 
-Dark theme preferred.
+```json
+// Request
+{ "credential": { ...RentalCredential } }
 
-Background: #0B0B0F
+// Response
+{
+  "valid": true,
+  "message": "Credential verified successfully.",
+  "checks": { "signatureValid": true, ... },
+  "reasons": []
+}
+```
 
-Primary accent: Privacy Green
+---
 
-Example: #3EF29B
+## RoomFi Integration
 
-Secondary accent: Cyan
+The "Use in RoomFi ↗" action on the result screen submits the tenant's credential to RoomFi. This is the primary cross-product integration point:
 
-Example: #2BD9FE
+1. Tenant generates their `RentalCredential` on RoomID
+2. Credential is submitted to RoomFi via the action button (currently simulated — posts the credential object)
+3. RoomFi calls `POST /api/verify-credential` to validate the signature and integrity before accepting the application
+4. Landlord sees the tenant's **tier** and **score** without accessing raw documents
 
-Neutral text colors:
+In production this flow would use a ZK proof instead of the raw credential, so RoomFi only learns "score ≥ threshold" without seeing the exact number.
 
-Primary text: #FFFFFF
+---
 
-Secondary text: #B6B6C2
+## ZK Roadmap (Noir by Aztec)
 
-Card background: #14141A
+The current HMAC signature is a stand-in. The `proof_mode: "simulated"` and `zk_ready: true` fields flag which credentials are ready for circuit replacement.
 
-Border: #26262E
+Planned Noir circuits:
 
-------------------------------------------------------------------------
+| Circuit | Statement proven |
+|---|---|
+| `proof_no_default` | `assert(defaults == 0)` |
+| `proof_score_threshold` | `assert(score >= threshold)` — without revealing the score |
+| `proof_rent_affordability` | `assert(rent <= income * 0.3)` — without revealing income |
 
-# Typography
+- Proof generation: **client-side** (browser / mobile)
+- Verification: **EVM smart contract** (Noir-generated Solidity verifier)
 
-Primary font:
+---
 
-Inter
+## Getting Started
 
-Alternative options:
+```bash
+npm install
+npm run dev
+```
 
-Space Grotesk IBM Plex Sans
+App runs at `http://localhost:3000`.
 
-Headers should feel slightly technical.
+The demo uses an in-memory job store — jobs reset on server restart.
 
-Example headline:
+---
 
-RoomID\
-Privacy‑Preserving Rental Identity
+## Part of Room Protocol
 
-------------------------------------------------------------------------
+| Product | Role |
+|---|---|
+| **RoomID** | Identity & credential layer |
+| **RoomFi** | Rental marketplace — consumes RoomID credentials |
+| **RoomLen** | Liquidity & deposit streaming |
 
-# UI Components
+Portal: [roomprotocol.netlify.app](https://roomprotocol.netlify.app)
 
-RoomID should reuse general layout patterns from RoomFi / RoomLen but
-with darker styling.
-
-Components:
-
-Cards\
-Status badges\
-Upload panels\
-Verification panels\
-Proof result cards
-
-Example card styling:
-
-Border radius: 12px\
-Soft shadow\
-Subtle glow on accent elements
-
-------------------------------------------------------------------------
-
-# Key Screens
-
-## 1. Landing
-
-Hero message:
-
-Prove your rental reliability\
-without revealing your private data.
-
-CTA:
-
-Create RoomID
-
-Secondary CTA:
-
-Upload Rental History
-
-------------------------------------------------------------------------
-
-## 2. Document Upload
-
-Drag and drop upload areas.
-
-Cards:
-
-Upload Rental Contract
-
-Upload Payment Proofs
-
-Optional Landlord Reference
-
-Accepted formats:
-
-PDF\
-JPG\
-PNG
-
-------------------------------------------------------------------------
-
-## 3. Processing Screen
-
-Animated status steps:
-
-Analyzing documents
-
-Extracting payment history
-
-Computing reliability score
-
-Preparing zk‑proof (demo)
-
-------------------------------------------------------------------------
-
-## 4. Result Screen
-
-Display a credential card.
-
-Example:
-
-Rental Reliability Score
-
-92 / 100
-
-Tier A
-
-Indicators:
-
-✔ No defaults\
-✔ 12 months verified\
-✔ Max delay: 2 days
-
-Actions:
-
-Use in RoomFi\
-Share Credential\
-Download Proof
-
-------------------------------------------------------------------------
-
-# Crypto Credibility Indicators
-
-Example badges shown in UI:
-
-Powered by Noir (Aztec)\
-Privacy Proof Enabled\
-zk‑Ready Architecture
-
-These signals help judges understand the technical direction
-immediately.
-
-------------------------------------------------------------------------
-
-# Demo Scope Clarification
-
-For the hackathon:
-
--   zk proofs are simulated
--   Noir circuits are mocked
--   backend signatures emulate verification
-
-Architecture is designed so Noir circuits can replace this later.
-
-------------------------------------------------------------------------
-
-# Core Functionality
-
-RoomID allows users to upload rental history documents and convert them
-into a structured rental reputation credential.
-
-Inputs:
-
-Rental contract\
-Payment receipts or transfers
-
-Optional:
-
-Landlord reference letter
-
-------------------------------------------------------------------------
-
-# AI Processing Pipeline
-
-Step 1: OCR extraction.
-
-Extract:
-
-Tenant name\
-Monthly rent\
-Due date\
-Contract duration\
-Payment dates\
-Payment amounts
-
-Tools:
-
-Google Vision\
-AWS Textract\
-Tesseract\
-OpenAI Vision
-
-------------------------------------------------------------------------
-
-Step 2: Normalize data into structured JSON.
-
-Example:
-
-{ "monthly_rent": 8000, "due_day": 5, "payments": \[ { "month":
-"2024-01", "amount": 8000, "paid_on": "2024-01-04" } \] }
-
-------------------------------------------------------------------------
-
-# Rental Reliability Analysis
-
-Metrics:
-
-Total months analyzed
-
-On‑time payments
-
-Late payments
-
-Maximum delay
-
-Default count
-
-Definitions:
-
-Late payment: Payment received more than 5 days after due date.
-
-Default: Payment missing after 30 days.
-
-------------------------------------------------------------------------
-
-# Rental Reliability Score
-
-Demo scoring model:
-
-Base Score = 100
-
--5 points per late payment
-
--20 points per default
-
-+5 bonus for 12 consecutive payments
-
-Score range:
-
-0 -- 100
-
-Tiers:
-
-90 -- 100 → Tier A (Excellent)\
-75 -- 89 → Tier B (Good)\
-60 -- 74 → Tier C (Medium)\
-\< 60 → Tier D (High Risk)
-
-------------------------------------------------------------------------
-
-# Credential Output
-
-Example:
-
-{ "user_id": "uuid", "rental_score": 92, "tier": "A", "months_verified":
-12, "defaults": 0, "max_delay_days": 2, "hash_of_documents":
-"SHA256(...)", "timestamp": "ISO8601" }
-
-Credential is signed by backend for the demo.
-
-------------------------------------------------------------------------
-
-# Zero Knowledge Future (Noir)
-
-Future production version will implement zk proofs using:
-
-Noir (Aztec)
-
-Possible circuits:
-
-Proof of No Default\
-Proof Income ≥ X\
-Proof Rent ≤ 30% Income
-
-Example circuit logic:
-
-assert(no_defaults == true)\
-assert(income \>= threshold)\
-assert(rent \<= income \* 0.3)
-
-Proof generation: client side\
-Verification: smart contract
-
-------------------------------------------------------------------------
-
-# Architecture
-
-Frontend
-
-Next.js\
-React
-
-Backend
-
-Node.js\
-Express
-
-Services
-
-OCR processor\
-Scoring engine
-
-Database
-
-PostgreSQL
-
-Storage
-
-Encrypted S3 compatible storage
-
-------------------------------------------------------------------------
-
-# API Endpoints
-
-POST /upload-documents
-
-GET /job-status/:id
-
-GET /rental-score/:userId
-
-POST /verify-credential
-
-------------------------------------------------------------------------
-
-# Value Proposition
-
-RoomID creates a portable rental identity.
-
-Users can prove:
-
-No default history\
-Payment consistency\
-Financial reliability
-
-Without revealing:
-
-Exact income\
-Full banking records\
-Sensitive financial data
-
-------------------------------------------------------------------------
-
-RoomID = Privacy Layer for Rental Markets in LATAM
